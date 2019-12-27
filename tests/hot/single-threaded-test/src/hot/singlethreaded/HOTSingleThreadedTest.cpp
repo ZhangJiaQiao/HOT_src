@@ -24,6 +24,11 @@
 #include "idx/utils/8ByteDatFileIO.hpp"
 #include <idx/utils/RandomRangeGenerator.hpp>
 
+#include <time.h>
+#include <stack>
+#include <map>
+#include <queue>
+
 namespace hot { namespace singlethreaded {
 
 using HOTSingleThreadedUint64 = hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>;
@@ -298,12 +303,14 @@ Node HOTNodeToNode(HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMappi
 	temp_Node.pKey.pKey = new uint8_t[pKeySize];
 	temp_Node.value.value = new uint64_t[temp_Node.numEntries];
 	memcpy(temp_Node.pKey.pKey, single_mask_node->mPartialKeys.mEntries, pKeySize);
-	memcpy(temp_Node.value.value, single_mask_node->mFirstChildPointer, sizeof(uint64_t) * temp_Node.numEntries);
-	
+	// memcpy(temp_Node.value.value, single_mask_node->mFirstChildPointer, sizeof(uint64_t) * temp_Node.numEntries);
+	for (int i = 0; i < temp_Node.numEntries; i++) {
+		temp_Node.value.value[i] = single_mask_node->mFirstChildPointer[i].getPointer();
+	}
 	return temp_Node;
 }
 
-void storeNode(HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* single_mask_node, char* fileName) {
+void storeNode(HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* single_mask_node, const char* fileName) {
 	Node node = HOTNodeToNode(single_mask_node);
 	std::ofstream file(fileName, std::ios::out | std::ios::binary | std::ios::trunc);
 	if (!file) {
@@ -315,8 +322,8 @@ void storeNode(HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, 
 	file.write((char*)&node.usedEntriesMask, sizeof(node.usedEntriesMask));
 	file.write((char*)&node.height, sizeof(node.height));
 	file.write((char*)&node.mapping, sizeof(node.mapping));
-	file.write((char*)&node.pKey.pKey, sizeof(pKeySize));
-	file.write((char*)&node.value.value, sizeof(uint64_t) * node.numEntries);
+	file.write((char*)(node.pKey.pKey), pKeySize);
+	file.write((char*)node.value.value, sizeof(uint64_t) * node.numEntries);
 	file.close();
 }
 
@@ -335,7 +342,7 @@ NodeTemplate* NodeToHOTNode(Node* node) {
 	return hotNode;
 }
 
-HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* readNode(char* filename) {
+HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* readNode(const char* filename) {
 	Node *node = new Node;
 	std::ifstream file(filename, std::ios::in | std::ios::binary);
 	if (!file) {
@@ -350,24 +357,104 @@ HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* readN
 	file.read((char*)&node->usedEntriesMask, sizeof(node->usedEntriesMask));
 	file.read((char*)&node->height, sizeof(node->height));
 	file.read((char*)&node->mapping, sizeof(node->mapping));
-	file.read((char*)&node->pKey, sizeof(pKeySize));
-	file.read((char*)&node->value.value, sizeof(uint64_t) * node->numEntries);
+	file.read((char*)node->pKey.pKey, pKeySize);
+	file.read((char*)node->value.value, sizeof(uint64_t) * node->numEntries);
 	file.close();
 	
 	NodeTemplate* hotNode = NodeToHOTNode(node);
+
+	delete node->pKey.pKey;
+	delete node->value.value;
+	delete node;
+
 	return hotNode;
 }
 
-template<typename ValueType>
-void persistHOT(std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<ValueType, idx::contenthelpers::IdentityKeyExtractor>> hot_instance) {
+void persistHOT(std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance) {
+	uint64_t counter = 1;
 	// traverse the HOT and store every nodes of its
+	HOTSingleThreadedChildPointer* root = &(hot_instance->mRoot);
+	std::stack<uint64_t> pointerStack;
+	std::stack<uint64_t> allNodePointer;
+	std::map<uint64_t, uint64_t> addrToFileId;
+	addrToFileId[(uint64_t)root->getNode()] = counter;
+	pointerStack.push((uint64_t)root->getNode());
+	allNodePointer.push((uint64_t)root->getNode());
+	bool flag = true;
+	// identity and store all Node in a stack
+	while(!pointerStack.empty()) {
+		flag = false;
+		NodeTemplate* tempNode = (NodeTemplate*)pointerStack.top();
+		pointerStack.pop();
+		uint64_t num = tempNode->getNumberEntries();
+		for (int i = 0; i < num; i++) {
+			HOTSingleThreadedChildPointer* tempPointer = tempNode->getPointers() + i;
+			if (tempPointer->isNode()) {
+				counter++;
 
+				pointerStack.push((uint64_t)tempPointer->getNode());
+				allNodePointer.push((uint64_t)tempPointer->getNode());
+				addrToFileId[(uint64_t)tempPointer->getNode()] = counter;
+				tempPointer->setPointer(counter << 1);
+			}
+		}
+	}
+	std::string filePath = "/home/zhangjoe/Desktop/Node/";
+	while(!allNodePointer.empty()) {
+		NodeTemplate* tempNode = (NodeTemplate*)allNodePointer.top();
+		allNodePointer.pop();
+		std::string fileName = filePath + std::to_string(addrToFileId[(uint64_t)tempNode]);
+		storeNode(tempNode, fileName.c_str());
+		delete tempNode;
+	}
+	std::string metaFile = filePath + "meta";
+	std::ofstream metadata(metaFile, std::ios::out | std::ios::binary | std::ios::trunc);
+	metadata.write((char*)&counter, sizeof(counter));
+	metadata.close();
 }
 
-template<typename ValueType>
-std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<ValueType, idx::contenthelpers::IdentityKeyExtractor>> recoverHOT(std::vector<ValueType> ) {
+std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> recoverHOT() {
 	// traverse all nodes that is stored in disk and recover the tree
+	std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance = std::make_shared<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>>();
+	uint64_t nodeNum = 0;
+	std::string filePath = "/home/zhangjoe/Desktop/Node/";
+	std::string metaFile = filePath + "meta";
+	std::ifstream metadata(metaFile, std::ios::in | std::ios::binary);
+	metadata.read((char*)&nodeNum, sizeof(nodeNum));
+	metadata.close();
+
+	std::map<uint64_t, uint64_t> fileIdToAddr;
+	std::queue<uint64_t> allNodePointer;
+
+	// load all node from storage
+	for (int i = 1; i < nodeNum; i++) {
+		std::string fileName = filePath + std::to_string(i);
+		NodeTemplate* node = readNode(fileName.c_str());
+		if (i == 1) {
+			hot_instance->mRoot = node->toChildPointer();
+		}
+		if (node != NULL) {
+			fileIdToAddr[i] = (uint64_t)node;
+			allNodePointer.push((uint64_t)node);
+		}
+	}
 	
+	while (!allNodePointer.empty()) {
+		NodeTemplate* node = (NodeTemplate*)allNodePointer.front();
+		allNodePointer.pop();
+		uint64_t numEntries = node->getNumberEntries();
+		for (int i = 0; i < numEntries; i++) {
+			HOTSingleThreadedChildPointer* tempPointer = node->getPointers() + i;
+			// convert fileId to memory address of nodes
+			if (tempPointer->isNode()) {
+				uint64_t fileId = (tempPointer->getPointer() >> 1);
+				NodeTemplate* nodeAddr = (NodeTemplate*)fileIdToAddr[fileId];
+				HOTSingleThreadedChildPointer childPointer = nodeAddr->toChildPointer();
+				*tempPointer = childPointer;
+			}
+		}
+	}
+	return hot_instance;
 }
 
 BOOST_AUTO_TEST_SUITE(HOTSingleThreadedTest)
@@ -387,27 +474,68 @@ BOOST_AUTO_TEST_CASE(testPersistOneFullNode) {
 	int numberEntries = 1 * 32; // insert one full node
 	std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance = std::make_shared<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>>();
 	// initial the in-memory hot
+	clock_t start, finish;
+	double duration1, duration2;
+	start = clock();
 	for (int i = 0; i < numberEntries; i++) {
 		uint64_t insertValue = i;
 		hot_instance->insert(insertValue);
 	}
+	finish = clock();
+	duration1 = (double)(finish - start) / CLOCKS_PER_SEC;
 	HOTSingleThreadedChildPointer root = hot_instance->mRoot;
-	intptr_t node_pointer = root.getTid();
-	HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* single_mask_node = (HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>*)node_pointer;
+	HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* single_mask_node = (HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>*)(root.getNode());
 	
 	char* fileName = "/home/zhangjoe/Desktop/Node_File";
 	storeNode(single_mask_node, fileName);
-	delete single_mask_node;
-	single_mask_node = NULL;
 	std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance_copy = std::make_shared<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>>();
-	single_mask_node = readNode(fileName);
-	hot_instance_copy->mRoot = single_mask_node->toChildPointer();
+	
+	start = clock();
+	HOTSingleThreadedNode<hot::commons::SingleMaskPartialKeyMapping, uint8_t>* single_mask_node_copy = readNode(fileName);
+	hot_instance_copy->mRoot = single_mask_node_copy->toChildPointer();
+	finish = clock();
+	duration2 = (double)(finish - start) / CLOCKS_PER_SEC;
 
+	// test the correctness of write and read a node
+	// for (int i = 0; i < numberEntries; i++) {
+	// 	uint64_t value = i;
+	// 	idx::contenthelpers::OptionalValue<uint64_t> result = hot_instance_copy->lookup(value);
+	// 	std::cout << "Key :" << value << " Value: " << result.mValue << std::endl;
+	// }
+	std::cout << "======== Test recovering one full node ========" << std::endl;
+	std::cout << "Used Time in old way: " << duration1 << std::endl << "Used Time in new way: " << duration2 << std::endl;
+}
+
+BOOST_AUTO_TEST_CASE(testPersistWholeHOT) {
+	int numberEntries = 32 * 32; // insert two level HOT
+	std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance = std::make_shared<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>>();
+	std::shared_ptr<hot::singlethreaded::HOTSingleThreaded<uint64_t, idx::contenthelpers::IdentityKeyExtractor>> hot_instance_recover;
+	// initial the in-memory hot
+	clock_t start, finish;
+	double duration1, duration2;
+	start = clock();
 	for (int i = 0; i < numberEntries; i++) {
-		uint64_t value = i;
-		idx::contenthelpers::OptionalValue<uint64_t> result = hot_instance_copy->lookup(value);
-		std::cout << "Key :" << value << " Value: " << result.mValue;
+		uint64_t insertValue = i;
+		hot_instance->insert(insertValue);
 	}
+	finish = clock();
+	duration1 = (double)(finish - start) / CLOCKS_PER_SEC;
+
+	persistHOT(hot_instance);
+	hot_instance->mRoot = NULL;
+	start = clock();
+	hot_instance_recover = recoverHOT();
+	finish = clock();
+
+	// for (int i = 0; i < numberEntries; i+=32) {
+	// 	uint64_t value = i;
+	// 	idx::contenthelpers::OptionalValue<uint64_t> result = hot_instance_recover->lookup(value);
+	// 	std::cout << "Key :" << value << " Value: " << result.mValue << std::endl;
+	// }
+	duration2 = (double)(finish - start) / CLOCKS_PER_SEC;
+	std::cout << "======== Test recovering Hot with 32 full nodes ========" << std::endl;
+	std::cout << "Used Time in old way: " << duration1 << std::endl << "Used Time in new way: " << duration2 << std::endl;
+
 }
 
 

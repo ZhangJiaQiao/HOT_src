@@ -14,6 +14,9 @@ class HOTSingleThreadedChildPointer {
 	intptr_t mPointer;
 
 public:
+	inline void setPointer(intptr_t p) { mPointer = p; }
+	inline intptr_t getPointer() { return mPointer; }
+
 	template<hot::commons::NodeType  nodeAlgorithmType>
 	static inline auto castToNode(HOTSingleThreadedNodeBase const *node);
 
